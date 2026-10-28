@@ -1,0 +1,85 @@
+application:
+  subdomain: xread
+  multi_instance: false
+  public_path:
+    - /
+  upstreams:
+    - location: /
+      backend: http://xread:7777/
+  injects:
+    # 三阶段免密登录：首次初始化管理员时捕获凭据，之后自动填充
+    - id: capture-credentials
+      on: request
+      auth_required: false
+      when:
+        - /api/register
+        - /api/login
+        - /api/auth
+        - /api/user
+        - /api/setup
+      do: |
+        const payload = ctx.body.getJSON();
+        const user = payload && (payload.username || payload.user || payload.account);
+        if (user && payload.password) {
+          ctx.flow.set("pending_user", String(user));
+          ctx.flow.set("pending_pass", String(payload.password));
+        }
+    - id: persist-credentials
+      on: response
+      auth_required: false
+      when:
+        - /api/register
+        - /api/login
+        - /api/auth
+        - /api/user
+        - /api/setup
+      do: |
+        if (ctx.status >= 200 && ctx.status < 300) {
+          const user = ctx.flow.get("pending_user");
+          const pass = ctx.flow.get("pending_pass");
+          if (user && pass) {
+            ctx.persist.set("saved_user", user);
+            ctx.persist.set("saved_pass", pass);
+          }
+        }
+    - id: autofill-login
+      when:
+        - /
+      do:
+        - src: builtin://simple-inject-password
+          params:
+            user:
+              $persist: saved_user
+            password:
+              $persist: saved_pass
+    - id: open-save-chooser
+      on: browser
+      when:
+        - /*
+      do:
+        - src: file:///lzcapp/pkg/content/lazycat-injects/lzc-file-chooser-inject.js
+
+services:
+  xread:
+    # upstream: ghcr.io/charmillionaire/xread:v1.0.48
+    image: ghcr.1ms.run/charmillionaire/xread:v1.0.48
+    environment:
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=7777
+      - LOG_LEVEL=info
+      - SECURE=true
+      - PUBLIC_READ=false
+      - USER_LIMIT=50
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:7777/ >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    binds:
+      - /lzcapp/var/storage:/app/storage
+
+usage: |
+  XRead 是小说与媒体阅读器，支持 Legado 书源解析、音视频流播放。
+  首次打开需初始化管理员账号（免密登录会记住首次凭据），之后可在设置里生成邀请码邀请家人注册。
+  书源规则请自行导入，软件本身不提供任何内容。
